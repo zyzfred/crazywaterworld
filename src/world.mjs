@@ -134,10 +134,11 @@ function trackResidentOrders(client) {
   return session;
 }
 
-export function watchResidentRefreshes(client,ledger,player){
- const session=trackResidentOrders(client),world=exactAutomationId(player?.worldId),id=exactAutomationId(player?.playerId);
- if(ledger&&world&&id)session.manualRefresh={ledger,identity:world+':'+id};
- return session;
+export function watchResidentRefreshes(client, ledger, player) {
+  const session = trackResidentOrders(client);
+  const world = exactAutomationId(player?.worldId), id = exactAutomationId(player?.playerId);
+  if (ledger && world && id) session.refresh = { ledger, identity: world + ':' + id };
+  return session;
 }
 
 function rememberResidentOrders(session, orders) {
@@ -148,17 +149,28 @@ function rememberResidentOrders(session, orders) {
     const quantities = new Map();
     for (const item of order.requirements ?? []) quantities.set(item.id ?? '', (quantities.get(item.id ?? '') ?? 0) + Number(item.num ?? 0));
     const needs = [...quantities].sort(([a], [b]) => a.localeCompare(b));
-    const signature = JSON.stringify([order.workerId ?? 0, order.textId ?? 0, !!order.isSpecial, order.refreshTime ?? 0, needs]);
-    if (session.get(index)?.signature !== signature) session.set(index, { key: randomUUID(), signature });
+    const refreshTime = order.refreshTime ?? 0;
+    const signature = JSON.stringify([order.workerId ?? 0, order.textId ?? 0, !!order.isSpecial, refreshTime, needs]);
+    const observed = Number.isSafeInteger(refreshTime) && (refreshTime > 0 ||
+      (refreshTime === 0 && needs.length > 0 && needs.every(([id, num]) => id && Number.isSafeInteger(num) && num > 0)));
+    if (session.get(index)?.signature !== signature) session.set(index, { key: randomUUID(), signature, observed });
     keys.set(index, session.get(index).key);
   }
-  session.refreshPending=new Set();
-  if(session.manualRefresh){const {ledger,identity}=session.manualRefresh;
-    for(const[key,record]of Object.entries(ledger.keyRecords())){
-      const detail=record.details;if(detail?.kind!=='manualOrderRefresh'||detail.identity!==identity)continue;
-      const row=session.get(detail.index);if(!row||!keys.has(detail.index))continue;
-      if(row.signature!==detail.signature){if(!record.confirmed)ledger.resolveKey(key,true);ledger.releaseCompletedKey(key);}
-      else if(!record.confirmed){keys.set(detail.index,null);session.refreshPending.add(detail.index);}
+  session.refreshPending = new Set();
+  if (session.refresh) {
+    const { ledger, identity } = session.refresh;
+    for (const [key, record] of Object.entries(ledger.keyRecords())) {
+      const detail = record.details;
+      if (detail?.kind !== 'manualOrderRefresh' || detail.identity !== identity) continue;
+      const row = session.get(detail.index);
+      if (!row || !keys.has(detail.index)) continue;
+      if (row.observed && row.signature !== detail.signature) {
+        if (!record.confirmed) ledger.resolveKey(key, true);
+        ledger.releaseCompletedKey(key);
+      } else if (!record.confirmed) {
+        keys.set(detail.index, null);
+        session.refreshPending.add(detail.index);
+      }
     }
   }
   for (const index of session.keys()) if (!keys.has(index)) session.delete(index);
@@ -617,9 +629,9 @@ export function planWorld(survey, {
       orderDecisions.push({ index: order.index, status, reason, shortages, harvestNeeds });
       if (status !== 'ready' && status !== 'disabled') notes.push(label + ' ' + reason);
     };
-    // v74 ignores the previous order's requirements while its slot is refreshing.
-    if (order.refreshTime) { decision('refreshing', '订单刷新中，等待新需求'); continue; }
-    if (order.orderKey === null) { decision('unknown', order.refreshPending?'上次手动换单结果待确认，等待服务器更新':'服务器返回重复的订单槽位，请刷新后再试'); continue; }
+    // The previous requirements remain in the slot until the server replaces them.
+    if (order.refreshTime) { decision('refreshing', '居民协商中，等待新需求'); continue; }
+    if (order.orderKey === null) { decision('unknown', order.refreshPending ? '换单结果待确认，等待服务器更新' : '服务器返回重复的订单槽位，请刷新后再试'); continue; }
     if (survey.orderCheckError || !order.requirements.length || order.requirements.some(r => !r.id || !(r.num > 0))) {
       decision('unknown', survey.orderCheckError || '尚未收到完整订单需求');
       continue;
@@ -628,10 +640,13 @@ export function planWorld(survey, {
     const filter = residentFilter(order, { ...survey, available: id => Math.max(0, free(id) + lendable(id)), cropIds: survey.cropIds ?? new Set(rowsOf(config, 'FarmlandPlantCfg').map(row => row.id)),
       orderOfTheDay: { ...survey.orderOfTheDay, orderNum: countBefore + residentPlanned } }, settings, usage);
     if (filter) {
-      decision('filtered', filter);
-      if (settings?.resident.enabled && settings.resident.reroll && enabled('denyOrder') && !filter.includes('上限') && (survey.player?.level ?? 0) >= 12) {
-        actions.push({ kind: 'denyOrder', request: 'DenyOrderRequest', response: null, body: { index: order.index }, orderKey: order.orderKey,
-          label: `刷新${label}：${filter}` });
+      const kind = filter.refresh;
+      const negotiate = kind === 'negotiateOrder';
+      const canRefresh = kind && enabled(kind) && survey.player?.level >= 12 && (!negotiate || order.orderKey);
+      decision(negotiate && canRefresh ? 'negotiate' : 'filtered', filter.reason);
+      if (canRefresh) {
+        actions.push({ kind, request: 'DenyOrderRequest', response: null, body: { index: order.index }, orderKey: order.orderKey,
+          label: `${negotiate ? '协商' : '刷新'}${label}：${filter.reason}` });
       }
       continue;
     }
@@ -1130,7 +1145,7 @@ export async function runWorldRound(client, protocol, plan, {
   const result = await runWorld(client, protocol, plan, execution);
   const canFinish = finishEnabled ?? (() => !options.enabled || options.enabled('finishOrder'));
   for (const { step } of result.results) {
-    if (step.kind === 'finishOrder' || step.kind === 'denyOrder') attemptedOrders.add(step.body.index);
+    if (['finishOrder', 'negotiateOrder', 'denyOrder'].includes(step.kind)) attemptedOrders.add(step.body.index);
   }
   result.followupCount = 0;
   if (!canFinish()) return result;
@@ -1184,32 +1199,56 @@ async function confirmResidentOrder(client, protocol, step, config, player, carg
   return { action: current };
 }
 
-// 手动换单只处理当前显示的一单，使用原拒单协议，不付费加速刷新。
-export async function rerollResidentOrder(client,protocol,{index,orderKey,config,player,ledger,enabled=()=>true}){
- if(!Number.isSafeInteger(index)||index<0||typeof orderKey!=='string'||!orderKey)throw Error('请从当前订单列表选择换单');
- if(!enabled())throw Error('账号状态已变化，已取消换单');
- if(!Number.isSafeInteger(player?.level)||player.level<12)throw Error('手动换单需要角色12级');
- const session=watchResidentRefreshes(client,ledger,player),identity=session.manualRefresh?.identity;
- if(!identity||!ledger)throw Error('换单记录或角色身份不可用');
- if(session.get(index)?.key!==orderKey)throw Error('这条订单已变化，请刷新后再选择');
- const before=await surveyWorld(client,protocol,{config,player,ordersOnly:true,includeWeekOrder:false}),order=before.orders.find(r=>r.index===index);
- if(!order||order.orderKey!==orderKey)throw Error(order?.refreshPending?'上次换单结果待确认，暂不重复提交':'这条订单已刷新或已处理');
- if(order.refreshTime>0)throw Error('订单正在刷新，等待新订单');
- if(!order.requirements?.length)throw Error('当前订单需求未同步');
- if(session.get(index)?.key!==orderKey)throw Error('这条订单已变化，请刷新后再选择');
- const signature=session.get(index)?.signature;
- const key='manual-order:'+identity+':'+index+':'+createHash('sha256').update(signature).digest('hex').slice(0,24);
- if(ledger.hasKey(key))throw Error('上次换单结果待确认，暂不重复提交');
- if(!enabled())throw Error('账号状态已变化，已取消换单');
- const ticket=ledger.reserve({},{},{},{uniqueKey:key,details:{kind:'manualOrderRefresh',identity,index,signature}});
- // 使其他持有旧页面标识的提交/换单失效，下一次读取由记录与服务器签名核对。
- session.delete(index);
- try{
-  await client.sendWatch('DenyOrderRequest',{index},{window:600});
-  await surveyWorld(client,protocol,{config,player,ordersOnly:true,includeWeekOrder:false});
-  if(session.get(index)?.signature&&session.get(index).signature!==signature){if(ledger.hasKey(key)){ledger.confirm(ticket);ledger.releaseCompletedKey(key);}return{index,label:'居民订单 #'+index+'已换单，等待新需求',status:'confirmed'};}
-  throw Error('换单请求已发送，结果待确认；请稍后刷新，暂不重复提交');
- }catch(error){if(error.prompt&&error.request==='DenyOrderRequest')ledger.cancel(ticket);throw error;}
+async function refreshResidentOrder(client, protocol, {
+  index, orderKey, config, player, ledger, enabled = () => true, validateOrder = () => true,
+}) {
+  if (!Number.isSafeInteger(index) || index < 0 || index > 2147483647 || typeof orderKey !== 'string' || !orderKey) {
+    throw new AutomationSkip('请从当前订单列表选择换单');
+  }
+  if (!enabled()) throw new AutomationSkip('账号状态已变化，已取消换单');
+  if (!Number.isSafeInteger(player?.level) || player.level < 12) throw new AutomationSkip('换单需要角色12级');
+  if (!protocol.DenyOrderRequest) throw new AutomationSkip('当前协议不支持居民订单换单');
+  const session = watchResidentRefreshes(client, ledger, player);
+  const identity = session.refresh?.identity;
+  if (!identity || !ledger) throw new AutomationSkip('换单记录或角色身份不可用');
+  if (session.get(index)?.key !== orderKey) throw new AutomationSkip('这条订单已变化，请刷新后再选择');
+
+  const read = () => surveyWorld(client, protocol, { config, player, ordersOnly: true, includeWeekOrder: false });
+  const before = await read();
+  const order = before.orders.find(row => row.index === index);
+  if (!order || order.orderKey !== orderKey || session.get(index)?.key !== orderKey) {
+    throw new AutomationSkip(order?.refreshPending ? '上次换单结果待确认，暂不重复提交' : '这条订单已刷新或已处理');
+  }
+  if (order.refreshTime > 0) throw new AutomationSkip('订单正在协商，等待新需求');
+  if (!order.requirements.length) throw new AutomationSkip('当前订单需求未同步');
+  if (!enabled() || !validateOrder(order, before)) throw new AutomationSkip('账号状态或设置已变化，已取消换单');
+
+  const { signature } = session.get(index);
+  const key = `manual-order:${identity}:${index}:${createHash('sha256').update(signature).digest('hex').slice(0, 24)}`;
+  if (ledger.hasKey(key)) throw new AutomationSkip('上次换单结果待确认，暂不重复提交');
+  // Keep the original ledger key so manual and automatic requests share the same reservation.
+  const ticket = ledger.reserve({}, {}, {}, { uniqueKey: key, details: { kind: 'manualOrderRefresh', identity, index, signature } });
+  session.delete(index);
+  try {
+    await client.sendWatch('DenyOrderRequest', { index }, { window: 600 });
+  } catch (error) {
+    if (error.notSent === true || (error.prompt && error.request === 'DenyOrderRequest')) {
+      ledger.cancel(ticket);
+      throw error;
+    }
+  }
+  // SCWorkerOrder can settle the reservation during the send. Otherwise check the current slot once.
+  if (ledger.hasKey(key) && client.connected !== false) {
+    try { await read(); } catch { /* Keep the reservation until a later server observation. */ }
+  }
+  if (!ledger.hasKey(key)) return { index, label: `居民订单 #${index}已换单，等待新需求`, status: 'confirmed' };
+  return { index, status: 'pending', reason: '换单请求结果待确认，等待服务器更新' };
+}
+
+export async function rerollResidentOrder(client, protocol, options) {
+  const result = await refreshResidentOrder(client, protocol, options);
+  if (result.status === 'pending') throw new Error(result.reason);
+  return result;
 }
 
 export async function submitResidentOrder(client, protocol, { index, orderKey, config, player, cargoEnabled = () => false, enabled = () => true }) {
@@ -1240,7 +1279,7 @@ export async function runWorld(client, protocol, plan, {
   onStep,
   enabled = () => true,
   config, player, cargoEnabled = () => false,
-  settings = null, getSettings, usage, getUsage, beforeStep, afterStep, cancelStep,
+  settings = null, getSettings, usage, getUsage, ledger, beforeStep, afterStep, cancelStep,
 } = {}) {
   if (!allowMutate) throw new Error('海面自动化会改变账号状态，需要 --yes');
   const results = [];
@@ -1270,6 +1309,22 @@ export async function runWorld(client, protocol, plan, {
     if (!step.manualCheck && !worldActionAllowed(currentSettings, step, config)) {
       const entry = { step, ok: false, skipped: true, error: '此动作已在设置中关闭或禁用' };
       results.push(entry); onStep?.(entry); continue;
+    }
+    if (step.kind === 'negotiateOrder') {
+      let entry;
+      try {
+        const result = await refreshResidentOrder(client, protocol, {
+          index: step.body.index, orderKey: step.orderKey, config, player, ledger,
+          enabled: () => client.connected !== false && enabled(step.kind) && worldActionAllowed(getSettings?.() ?? settings, step, config),
+          validateOrder: (order, survey) => residentFilter(order, survey, getSettings ? getSettings() : settings, getUsage?.() ?? usage)?.refresh === step.kind,
+        });
+        entry = { step, ...result, ok: result.status === 'confirmed' };
+      } catch (error) {
+        entry = { step, ok: false, ...(error.code === 'AUTOMATION_SKIP' ? { skipped: true } : {}), error: error.message };
+      }
+      results.push(entry);
+      onStep?.(entry);
+      continue;
     }
     const key = stepKey(step);
     const resident = step.kind === 'finishOrder' || step.kind === 'denyOrder';

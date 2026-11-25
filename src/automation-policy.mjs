@@ -36,7 +36,7 @@ export function worldPreferenceEnabled(settings, kind) {
   if (museumActions.has(kind) && settings.museum?.runEnabled === false) return false;
   if (['radarAuto', 'radarRepair'].includes(kind) && settings.radar?.runEnabled === false) return false;
   if (gatherTasks.has(kind) && (!settings.loop.world || settings.gather.enabled === false)) return false;
-  if (['gainFactory', 'collectProduct', 'finishUpgrade', 'build', 'buildSupply', 'upgrade', 'weekFactory', 'finishOrder', 'denyOrder', 'startProduce', 'farm', 'speedUpUpgrade', 'speedUpProduce'].includes(kind) && !settings.loop.world) return false;
+  if (['gainFactory', 'collectProduct', 'finishUpgrade', 'build', 'buildSupply', 'upgrade', 'weekFactory', 'finishOrder', 'negotiateOrder', 'denyOrder', 'startProduce', 'farm', 'speedUpUpgrade', 'speedUpProduce'].includes(kind) && !settings.loop.world) return false;
   const b = settings.building, f = settings.factory, r = settings.resident;
   switch (kind) {
     case 'gainFactory': return f.enabled && f.gain;
@@ -45,7 +45,7 @@ export function worldPreferenceEnabled(settings, kind) {
     case 'build': return b.enabled && b.build;
     case 'buildSupply': return b.enabled && b.supply && (b.build || b.upgrade) && f.enabled && f.produce;
     case 'upgrade': case 'weekFactory': return b.enabled && b.upgrade;
-    case 'finishOrder': return r.enabled;
+    case 'finishOrder': case 'negotiateOrder': return r.enabled;
     case 'denyOrder': return r.enabled && r.reroll;
     case 'startProduce': return f.enabled && (f.produce || f.cooperateNative);
     case 'farm': return settings.farm.enabled;
@@ -113,6 +113,7 @@ export function resourceReserve(settings, id) {
 export function worldActionAllowed(settings, step, config) {
   if (!settings) return true;
   if (!worldPreferenceEnabled(settings, step.kind)) return false;
+  if (step.kind === 'finishOrder' && usesBlockedResidentMaterials(step.costs, settings)) return false;
   if (step.demandSources?.length && !step.demandSources.some(source => activityProductionEnabled(settings, source))) return false;
   const id = step.body?.buildingId;
   const type = typeof id === 'string' ? (config?.tables?.BuildingCfg?.data ?? []).map(row => row.buildingType).sort((a, b) => b.length - a.length).find(t => id.endsWith(t)) : null;
@@ -126,18 +127,23 @@ export function worldActionAllowed(settings, step, config) {
   return true;
 }
 
+function usesBlockedResidentMaterials(requirements, settings) {
+  return requirements?.some(item => settings.resident.blockedMaterials.includes(item.id));
+}
+
 export function residentFilter(order, survey, settings, usage = {}) {
   if (!settings) return null;
   const r = settings.resident;
-  if (!r.enabled) return '居民需求总开关已关闭';
+  if (!r.enabled) return { reason: '居民需求总开关已关闭' };
   const count = Math.max(Number(survey.orderOfTheDay?.orderNum ?? 0), Number(usage.counters?.residentOrders ?? 0));
-  if (r.dailyCap > 0 && count >= r.dailyCap) return `今日满足次数 ${count}，已达上限 ${r.dailyCap}`;
-  if (r.blockedMaterials.some(id => order.requirements.some(item => item.id === id))) return '包含不准消耗的材料';
-  if (r.skipCrops && order.requirements.some(item => survey.cropIds?.has(item.id))) return '已设置跳过农作物订单';
+  if (r.dailyCap > 0 && count >= r.dailyCap) return { reason: `今日满足次数 ${count}，已达上限 ${r.dailyCap}` };
+  if (usesBlockedResidentMaterials(order.requirements, settings)) return { reason: '包含不准消耗的材料', refresh: 'negotiateOrder' };
+  const reroll = reason => ({ reason, refresh: 'denyOrder' });
+  if (r.skipCrops && order.requirements.some(item => survey.cropIds?.has(item.id))) return reroll('已设置跳过农作物订单');
   const available = survey.available ?? (id => survey.have(id) - resourceReserve(settings, id));
-  if (r.skipProduction && order.requirements.some(item => available(item.id) < item.num)) return '可用库存不足，已设置跳过需生产的订单';
-  if (r.minExp > 0 && (order.rewardExp == null || order.rewardExp < r.minExp)) return `经验奖励未达到 ${r.minExp}`;
-  if (r.minGold > 0 && (order.rewardGold == null || order.rewardGold < r.minGold)) return `金币奖励未达到 ${r.minGold}`;
+  if (r.skipProduction && order.requirements.some(item => available(item.id) < item.num)) return reroll('可用库存不足，已设置跳过需生产的订单');
+  if (r.minExp > 0 && (order.rewardExp == null || order.rewardExp < r.minExp)) return reroll(`经验奖励未达到 ${r.minExp}`);
+  if (r.minGold > 0 && (order.rewardGold == null || order.rewardGold < r.minGold)) return reroll(`金币奖励未达到 ${r.minGold}`);
   return null;
 }
 

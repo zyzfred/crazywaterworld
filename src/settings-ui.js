@@ -202,10 +202,10 @@ const configGroups = [
   ] },
   { id: 'resident', title: '居民需求', category: 'base', fields: [
     configField('resident.enabled', '自动满足'), configField('resident.skipCrops', '跳过农作物订单'), configField('resident.skipProduction', '跳过需生产的订单'),
-    configField('resident.blockedMaterials', '不准消耗', 'multi', { catalog: 'materials', empty: '未选择，允许消耗所有材料', help: '订单包含所选材料时，不自动交付。' }),
+    configField('resident.blockedMaterials', '不准消耗', 'multi', { catalog: 'materials', empty: '未选择，允许消耗所有材料', help: '自动交单时，包含所选材料的订单会先协商，等游戏换单后再检查。角色12级开放协商。' }),
     configField('resident.minExp', '最低经验', 'number', { help: '奖励低于此值或无法确认奖励时跳过，0 表示不限制。' }),
     configField('resident.minGold', '最低金币', 'number', { unit: '金币', help: '0 表示不限制。' }),
-    configField('resident.reroll', '不达最低经验或金币时自动换单', 'switch', { help: '任一最低奖励不满足时自动换单，也用于跳过农作物、需生产及禁用材料等不符合条件的订单；达到每日上限不会换单。角色12级起可用，关闭时只跳过并保留原订单。' }),
+    configField('resident.reroll', '不达最低经验或金币时自动换单', 'switch', { help: '控制低奖励、跳过农作物或需生产等订单的换单。角色12级开放，达到每日上限后暂停。' }),
     configField('resident.dailyCap', '每日满足上限', 'number', { unit: '单', help: '同时参考游戏今日完成数和本工具记录，0 表示不限。' }),
     configField('resident.rewards', '自动领取进度奖励'),
   ] },
@@ -1232,7 +1232,7 @@ async function configPreview() {
       data={groupRows:controls,fields:selected.fields,scopeLabel:selected.title,checkedAt:new Date().toISOString(),usage:configEditor.data.usage,viewOnly:true,actions:[],notes:[]};
       if(selected.category==='base' && selected.id!=='resources'){
         const plan=await call('/api/settings/preview',{method:'POST',body:JSON.stringify({settings:JSON.parse(original),category:'base'})});
-        const bases={building:['build','finishUpgrade','speedUpUpgrade','buildSupply','challengeField','giveUpField'],factory:['startProduce','gainFactory','collectProduct','speedUpProduce','nativeProduce'],farm:['farm'],resident:['finishOrder','denyOrder','checkResidentOrders'],cargo:['cargo','cargoLoad','cargoClaim'],gold:['paidGold'],gather:['autoDive','diveEnhance','autoSalvage','salvageEnhance','autoFish','fishEnhance','floaters','antiqueFloaters']};
+        const bases={building:['build','finishUpgrade','speedUpUpgrade','buildSupply','challengeField','giveUpField'],factory:['startProduce','gainFactory','collectProduct','speedUpProduce','nativeProduce'],farm:['farm'],resident:['finishOrder','negotiateOrder','denyOrder','checkResidentOrders'],cargo:['cargo','cargoLoad','cargoClaim'],gold:['paidGold'],gather:['autoDive','diveEnhance','autoSalvage','salvageEnhance','autoFish','fishEnhance','floaters','antiqueFloaters']};
         data.moduleActions=plan.actions.filter(a=>a.setting?.split('.')[0]===selected.id || bases[selected.id]?.includes(a.kind));
         data.usage=plan.usage;
       }

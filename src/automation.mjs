@@ -135,6 +135,7 @@ export function taskSettings(saved = {}) {
 export function worldTaskKey(kind) {
   if (kind === 'gainFactory' || kind === 'collectProduct') return 'collect';
   if (kind === 'speedUpUpgrade' || kind === 'speedUpProduce') return 'speedUp';
+  if (kind === 'negotiateOrder') return 'finishOrder';
   return kind;
 }
 

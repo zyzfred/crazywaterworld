@@ -967,7 +967,7 @@ setInterval(() => {
 function orderState(order, data) {
   const box = el('div', 'order-state');
   const decision = order.decision;
-  const labels = { ready: data.idleRunning ? '等待自动交付' : '等待开启挂机', disabled: '自动交付已关闭', refreshing: '订单刷新中',
+  const labels = { ready: data.idleRunning ? '等待自动交付' : '等待开启挂机', disabled: '自动交付已关闭', refreshing: '协商中', negotiate: '等待协商',
     unknown: '等待核对', missing: '材料不足', reserved: '材料已预留', reroll: '等待换单' };
   const state = decision?.status ?? 'unknown';
   const label = !data.autoDeliverOrders && !['reroll','refreshing'].includes(state) ? labels.disabled : labels[state] || labels.unknown;
@@ -1255,7 +1255,9 @@ bindGameAction('world-run', async () => {
     const data = await call('/api/world/run', { method: 'POST', body: JSON.stringify(body) });
     if (account !== current || disconnected.has(account)) return;
     worldVersion++;
-    $('world-hint').textContent = '执行 ' + data.results.length + ' 个动作，失败 ' + data.results.filter((r) => r.ok === false).length;
+    const pending = data.results.filter(r => r.status === 'pending').length;
+    const failed = data.results.filter(r => r.ok === false && r.status !== 'pending').length;
+    $('world-hint').textContent = '执行 ' + data.results.length + ' 个动作，失败 ' + failed + (pending ? '，待确认 ' + pending : '');
     if (!data.refreshError) renderWorld(data);
   } catch (error) {
     $('world-hint').textContent = '';

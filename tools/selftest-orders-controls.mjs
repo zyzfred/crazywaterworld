@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import{EventEmitter}from'node:events';
 import{loadProtocol}from'../src/proto.mjs';import{getConfig}from'../src/config.mjs';
-import{surveyWorld,rerollResidentOrder,watchResidentRefreshes,planWorld}from'../src/world.mjs';
+import{surveyWorld,rerollResidentOrder,watchResidentRefreshes,planWorld,runWorld}from'../src/world.mjs';
+import { runLoop } from '../src/loop.mjs';
 import{createUsageLedger,defaultSettings,settingsUiRules}from'../src/automation-settings.mjs';
 import{idleAutomationControls,automationControls,setAutomationControl}from'../src/automation-controls.mjs';
 import{automationTasks}from'../src/automation.mjs';
@@ -16,13 +17,31 @@ function renderedConfigGroups() {
 }
 function fixture(existing){
  const client=new EventEmitter(),player={playerId:123,worldId:2002001001,level:37,scenarioId:1};
- const state={orders:[{index:1,workerId:1,textId:0,isSpecial:false,refreshTime:0,requirements:[{id:'木材',num:3}]}],writes:[],mode:'ok',reads:0,beforeRead:null};
+ client.connected = true;
+ const stock = new Map([['木材', 100], ['塑料', 100]]);
+ const state={orders:[{index:1,workerId:1,textId:0,isSpecial:false,refreshTime:0,requirements:[{id:'木材',num:3}]}],writes:[],delivered:[],mode:'ok',reads:0,beforeRead:null};
  client.request=async(name,body={},response=name.replace(/Request$/,'Response'))=>{
   let reply;if(name==='OnWaterRequest'){state.reads++;await state.beforeRead?.();reply={building:[],workerOrder:state.orders};}
-  else if(name==='AllItemRequest')reply={items:[{itemId:'木材',num:100}]};else if(name==='AllResourceRequest')reply={list:[]};else if(name==='WeekInfoRequest')reply={activityTime:[]};else if(name==='MyResFieldsRequest')reply={info:{fields:[],maxNum:15}};else if(name==='MyFleetsRequest')reply={fleets:[]};else throw Error('未允许请求 '+name);
+  else if(name==='AllItemRequest')reply={items:[...stock].map(([itemId,num])=>({itemId,num}))};else if(name==='AllResourceRequest')reply={list:[]};else if(name==='WeekInfoRequest')reply={activityTime:[]};else if(name==='MyResFieldsRequest')reply={info:{fields:[],maxNum:15}};else if(name==='MyFleetsRequest')reply={fleets:[]};
+  else if (name === 'FinishWorkerOrderRequest') {
+    const order = state.orders.find(order => order.index === body.index);
+    for (const { id, num } of order.requirements) stock.set(id, stock.get(id) - num);
+    state.delivered.push(body.index);
+    state.orders = state.orders.filter(order => order.index !== body.index);
+    reply = { reward: { asset: [{ id: 'EXP', num: 5 }] } };
+  } else throw Error('未允许请求 '+name);
   return protocol[response].decode(protocol[response].encode(reply).finish());
  };
- client.sendWatch=async(name,body)=>{assert.equal(name,'DenyOrderRequest');protocol[name].decode(protocol[name].encode(body).finish());state.writes.push(body);if(state.mode==='reject')throw Object.assign(Error('明确拒绝'),{prompt:{prompt:5},request:name});if(state.mode==='unknown')throw Error('结果未知');if(state.mode==='silent')return;state.orders[0].refreshTime=Math.floor(Date.now()/1000)+60;client.emit('message',{name:'SCWorkerOrder',body:{order:state.orders}});};
+ client.sendWatch = async (name, body) => {
+   assert.equal(name, 'DenyOrderRequest');
+   protocol[name].decode(protocol[name].encode(body).finish());
+   state.writes.push(body);
+   if (state.mode === 'reject') throw Object.assign(Error('明确拒绝'), { prompt: { prompt: 5 }, request: name });
+   if (state.mode === 'unknown') throw Error('结果未知');
+   if (state.mode === 'silent') return;
+   state.orders.find(order => order.index === body.index).refreshTime = Math.floor(Date.now() / 1000) + 60;
+   if (state.mode !== 'readback') client.emit('message', { name: 'SCWorkerOrder', body: { order: state.orders } });
+ };
  const file=existing||path.join(folder,++seq+'.json'),ledger=createUsageLedger('fixture',{file});watchResidentRefreshes(client,ledger,player);
  const read=()=>surveyWorld(client,protocol,{config,player,ordersOnly:true,includeWeekOrder:false});
  const refresh=key=>rerollResidentOrder(client,protocol,{index:1,orderKey:key,config,player,ledger,enabled:()=>true});
@@ -33,6 +52,72 @@ await test('预检期间订单变化、角色等级不足、暂停均不发送',
 await test('静默未更新不能报成功，未知结果阻断自动与手动，跨重启保持',async()=>{const f=fixture();f.state.mode='silent';const s=await f.read();await assert.rejects(f.refresh(s.orders[0].orderKey),/待确认/);const after=await f.read();assert.equal(after.orders[0].refreshPending,true);assert.equal(after.orders[0].orderKey,null);const plan=planWorld(after,{config,allowReroll:true,enabled:()=>true});assert(!plan.actions.some(a=>['finishOrder','denyOrder'].includes(a.kind)));const g=fixture(f.file),resumed=await g.read();assert.equal(resumed.orders[0].orderKey,null);g.state.orders[0].refreshTime=Math.floor(Date.now()/1000)+60;const updated=await g.read();assert.equal(updated.orders[0].refreshPending,false);assert.equal(Object.keys(g.ledger.keyRecords()).length,0);assert.equal(g.state.writes.length,0);});
 await test('明确拒绝允许重新读取，未知错误保持待确认',async()=>{for(const mode of ['reject','unknown']){const f=fixture();f.state.mode=mode;const s=await f.read();await assert.rejects(f.refresh(s.orders[0].orderKey));const r=await f.read();assert.equal(r.orders[0].refreshPending,mode==='unknown');assert.equal(f.state.writes.length,1);}});
 await test('并发换同一单最多发送一次',async()=>{const f=fixture(),s=await f.read();await Promise.allSettled([f.refresh(s.orders[0].orderKey),f.refresh(s.orders[0].orderKey)]);assert.equal(f.state.writes.length,1);});
+
+function negotiationSettings() {
+  const settings = defaultSettings();
+  settings.resident.blockedMaterials = ['木材'];
+  settings.factory.enabled = settings.building.enabled = false;
+  return settings;
+}
+
+async function residentRound(f, settings) {
+  const { history } = await runLoop(f.client, protocol, {
+    config, player: f.player, rounds: 1, allowMutate: true,
+    isEnabled: key => key === 'finishOrder', getSettings: () => settings, usageLedger: f.ledger,
+  });
+  return history[0].world.results;
+}
+
+await test('禁耗材料单自动协商，等待期间交付其他订单，新需求继续协商或交付', async () => {
+  const f = fixture(), settings = negotiationSettings();
+  const original = structuredClone(f.state.orders[0]);
+  const ordinary = { ...original, index: 2, requirements: [{ id: '塑料', num: 2 }] };
+  const plan = planWorld(await f.read(), { config, settings });
+  assert.deepEqual(plan.actions.map(step => step.kind), ['negotiateOrder']);
+  f.state.orders.push(ordinary);
+  const first = await residentRound(f, settings);
+  assert.equal(first.find(entry => entry.step?.kind === 'negotiateOrder')?.status, 'confirmed');
+  assert.equal(first.find(entry => entry.step?.kind === 'finishOrder')?.ok, true);
+  assert.deepEqual(f.state.writes, [{ index: 1 }]);
+  assert.deepEqual(f.state.delivered, [2]);
+
+  f.state.orders[0].refreshTime = Math.floor(Date.now() / 1000) - 1;
+  await residentRound(f, settings);
+  assert.equal(f.state.writes.length, 1, '刷新时间已过时仍等服务器更新');
+  assert.deepEqual(f.state.delivered, [2]);
+
+  f.state.orders = [{ ...original, textId: 2 }];
+  f.state.mode = 'readback';
+  await residentRound(f, settings);
+  assert.deepEqual(f.state.writes, [{ index: 1 }, { index: 1 }]);
+  f.state.orders = [{ ...ordinary, index: 1, textId: 3 }];
+  await residentRound(f, settings);
+  assert.deepEqual(f.state.delivered, [2, 1]);
+});
+
+await test('协商失败结果待确认跨重连，设置在发送前改变则取消', async () => {
+  const f = fixture(), settings = negotiationSettings();
+  f.state.mode = 'silent';
+  const [entry] = await residentRound(f, settings);
+  assert.equal(entry?.status, 'pending');
+  assert.equal(f.state.writes.length, 1);
+  f.client.emit('message', { name: 'SCWorkerOrder', body: { order: [{ ...f.state.orders[0], requirements: [] }] } });
+  assert.equal(Object.keys(f.ledger.keyRecords()).length, 1, '不完整的订单推送不能确认换单');
+
+  const restarted = fixture(f.file);
+  await residentRound(restarted, settings);
+  assert.deepEqual(restarted.state.writes, []);
+  assert.deepEqual(restarted.state.delivered, []);
+  restarted.state.orders[0].textId = 2;
+  const plan = planWorld(await restarted.read(), { config, settings });
+  restarted.state.beforeRead = () => { settings.resident.blockedMaterials = []; };
+  const result = await runWorld(restarted.client, protocol, plan, {
+    allowMutate: true, config, player: restarted.player, ledger: restarted.ledger, getSettings: () => settings,
+  });
+  assert.equal(result.results[0]?.skipped, true);
+  assert.deepEqual(restarted.state.writes, []);
+  assert.deepEqual(restarted.ledger.keyRecords(), {});
+});
 await test('原配置值及子项选择保留，超凡英雄迁往活动后其余挂机入口完整',()=>{const required=['loop.world','building.enabled','factory.enabled','farm.enabled','resident.enabled','gather.enabled','cargo.enabled','events.enabled','pet.enabled','museum.runEnabled','forge.enabled','gold.enabled','worldBoss.enabled','radar.runEnabled','treasure.enabled','cityWar.enabled','antique.enabled','schedule.pirate','progression.enabled','pirateHunt.enabled','heroes.enabled','dailies.enabled','loop.tasks','loop.dailies','alliance.enabled','guildShip.enabled','guildFort.enabled','silicon.enabled',...['guildOrders','equipmentCollect','equipmentCraft','petCollect','petBreed'].map(key=>'schedule.'+key)];assert.deepEqual(new Set(idleAutomationControls.map(c=>c.key)),new Set(required));const groups=renderedConfigGroups();for(const control of idleAutomationControls)assert(groups.some(group=>group.id===control.configTarget),'配置入口必须存在：'+control.configTarget);assert.deepEqual([...new Set(idleAutomationControls.map(c=>c.idleGroup))],['基地','日常与活动','英雄','世界']);const before=defaultSettings();before.resident.minExp=400;before.resident.reroll=true;before.factory.produce=false;const after=setAutomationControl(before,'factory.enabled',false);const expected=structuredClone(before);expected.factory.enabled=false;assert.deepEqual(after,expected);assert(!settingsUiRules().controlFields.includes('resident.reroll'));assert(!settingsUiRules().controlFields.includes('building.upgrade'));assert(automationControls.some(c=>c.key==='resident.reroll'));});
 await test('三类基础小时合计来自结构化数值，缺数据不伪造零',()=>{const info={fields:[{cityId:39,type:3},{cityId:18,type:2},{cityId:1,type:1}]},player={worldId:2002001001,scenarioId:1};const rows=resourceFieldRows(config,player,info,[{id:1001,level:8}]);assert.deepEqual(resourceFieldTotals(info,rows).map(r=>r.perHour),[660,540,780]);assert.equal(resourceFieldTotals(info,resourceFieldRows(config,player,info,null))[2].perHour,null);assert(resourceFieldTotals(null,[]).every(r=>r.perHour===null));assert(resourceFieldTotals({fields:[]},[]).every(r=>r.perHour===0));});
 await test('页面和倒计时脚本可解析，旧总控区域消失，细项没有丢失',()=>{assert(!PAGE.includes('id="idle-master-controls"'));assert(PAGE.includes('data-idle-group="3"'));assert(PAGE.includes('不达最低经验或金币时自动换单'));assert(PAGE.includes('data-order-refresh-at'));for(const block of PAGE.matchAll(/<script>([\s\S]*?)<\/script>/g))new Function(block[1]);});

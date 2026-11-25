@@ -530,6 +530,8 @@ node tools/selftest-describe.mjs    # 字段布局还原自检
 `DenyOrder`（拒单消耗订单名额）与加速各有独立开关（`--reroll` / `--speed-up`），默认关闭；
 加速只花「加速器」道具，**不花钻石**；`--rounds 0` 表示一直跑到 Ctrl-C / 网页停止按钮。
 
+微信 v76 居民订单窗口的协商按钮在角色 12 级显示，发送 `DenyOrderRequest { index }`。控制台自动居民需求遇到「不准消耗」材料时沿用这个请求。由 `SCWorkerOrder` 推送或 `OnWaterResponse.workerOrder` 回读确认该槽位变化，`refreshTime` 为服务端提供的刷新时刻。即使倒计时已到，只要槽位仍标记为刷新中，就继续等服务器替换需求。自动协商只等自然刷新。
+
 ### 12.6 本轮实测结果
 
 - `tasks`：主线 62 领取成功，下一轮立刻出现主线 63，说明成长任务是链式的（领完当前才解锁下一条）。

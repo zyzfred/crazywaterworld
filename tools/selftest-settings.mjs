@@ -352,8 +352,16 @@ try {
     settings.resident.skipProduction = true;
     assert.equal(planWorld(state, { config, settings }).orderDecisions[1].status, 'filtered');
     settings.resident.skipProduction = false;
-    settings.resident.blockedMaterials = ['产品甲']; assert.equal(planWorld(state, { config, settings }).actions.length, 0);
-    settings.resident.reroll = true; assert.equal(planWorld(state, { config, settings }).actions.filter(a => a.kind === 'denyOrder').length, 2);
+    settings.resident.blockedMaterials = ['产品甲'];
+    assert.deepEqual(planWorld(state, { config, settings }).actions.map(a => a.kind), ['negotiateOrder', 'negotiateOrder']);
+    settings.resident.reroll = true;
+    assert.deepEqual(planWorld(state, { config, settings }).actions.map(a => a.kind), ['negotiateOrder', 'negotiateOrder']);
+    state.player.level = 11;
+    assert.deepEqual(planWorld(state, { config, settings }).actions, []);
+    state.player.level = 36;
+    settings.resident.dailyCap = 1;
+    assert.deepEqual(planWorld(state, { config, settings, usage: { counters: { residentOrders: 1 } } }).actions, []);
+    settings.resident.dailyCap = 0;
     settings.resident.blockedMaterials = []; settings.resident.reroll = false; settings.resident.minExp = 800;
     assert.equal(planWorld(state, { config, settings }).actions.length, 0);
     settings.resident.minExp = 0; settings.resident.minGold = 300; assert.equal(planWorld(state, { config, settings }).actions.length, 0);

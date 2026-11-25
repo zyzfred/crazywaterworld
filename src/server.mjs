@@ -2845,16 +2845,17 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const protectCargo = session.loop.tasks.cargo || needsCargoDemand(session.preferences);
         const survey = await surveyWorld(instance, protocol, { config, player: session.player, includeCargo: protectCargo });
         const settings = session.preferences;
-        const usage = usageFor(session).snapshot();
-        const extra = settings ? await surveyBaseAutomation(instance, protocol, config, session.player, settings, survey, { ledger: usageFor(session), enabled: () => session.client === instance && instance.connected !== false }) : null;
+        const ledger = usageFor(session);
+        const usage = ledger.snapshot();
+        const extra = settings ? await surveyBaseAutomation(instance, protocol, config, session.player, settings, survey, { ledger, enabled: () => session.client === instance && instance.connected !== false }) : null;
         const plan = planWorld(survey, { config, settings, usage, extraDemand: extra ? baseDemands(extra, config, settings) : [],
           allowSpeedUp: allowAccelerators && (!settings || session.loop.tasks.speedUp), allowReroll: settings ? settings.resident.reroll : payload.reroll === true,
           ...(settings ? { enabled: kind => session.loop.tasks[worldTaskKey(kind)] === true, minOrderExp: settings.resident.minExp } : {}) });
         plan.actions = plan.actions.filter(step => allowAccelerators || !(step.costs ?? []).some(cost => cost.id === '加速器' && cost.num > 0));
         const guard = actionGuard(session, instance);
         const { results } = await runWorldRound(instance, protocol, plan, {
-          config, player: session.player, allowMutate: true,
-          settings, getSettings: () => session.preferences, getUsage: () => usageFor(session).snapshot(),
+          config, player: session.player, allowMutate: true, ledger,
+          settings, getSettings: () => session.preferences, getUsage: () => ledger.snapshot(),
           beforeStep: step => {
             if (!allowAccelerators && (step.costs ?? []).some(cost => cost.id === '加速器' && cost.num > 0)) throw new AutomationSkip('本轮未允许花加速器');
             return guard.before(step);
@@ -2863,7 +2864,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           enabled: kind => generation === session.generation && !session.paused &&
             (!['finishOrder', 'denyOrder'].includes(kind) || protectCargo || !session.loop.tasks.cargo),
           onStep: (entry) => {
-            if (entry.skipped) emit(session, 'warn', `海面「${entry.step.label}」跳过：${entry.error}`);
+            if (entry.status === 'pending') emit(session, 'info', `海面「${entry.step.label}」${entry.reason}`);
+            else if (entry.skipped) emit(session, 'warn', `海面「${entry.step.label}」跳过：${entry.error}`);
             else emit(session, entry.ok ? 'info' : 'error', entry.ok ? `海面 ${entry.step.label}` : `海面 ${entry.step.label} 失败：${entry.error}`);
           },
         });
@@ -2876,7 +2878,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           emit(session, 'warn', '海面操作已结束，刷新状态失败：' + error.message);
           after = { refreshError: error.message };
         }
-        json({ ...after, results: results.map((r) => ({ label: r.step.label, ok: r.ok, skipped: r.skipped, error: r.error })) });
+        json({ ...after, results: results.map(r => ({ label: r.step.label, ok: r.ok, skipped: r.skipped, error: r.error, status: r.status })) });
         return;
       }
       if (route === 'GET /api/stages') {

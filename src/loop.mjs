@@ -39,7 +39,7 @@ import { rewardSchedule } from './reward-schedule.mjs';
 import { normalize } from './worlds.mjs';
 import { surveyTasks, runTasks } from './tasks.mjs';
 import { surveyDailies, runDailies } from './dailies.mjs';
-import { surveyWorld, planWorld, runWorldRound, displayBuilding } from './world.mjs';
+import { surveyWorld, planWorld, runWorldRound, displayBuilding, watchResidentRefreshes } from './world.mjs';
 import { createFactorySchedule } from './factory-schedule.mjs';
 import { createLoopScheduler } from './loop-scheduler.mjs';
 import { createActionGuard, nativePreferenceEnabled, needsCargoDemand, exactAutomationId } from './automation-policy.mjs';
@@ -109,6 +109,7 @@ export async function runLoop(client, protocol, {
   const history = [];
   const rewards = isEnabled ? rewardSchedule(client) : null;
   bridgeFleetReservations(client, getSettings, usageLedger, exactAutomationId(player?.worldId));
+  if (usageLedger) watchResidentRefreshes(client, usageLedger, player);
   let lastRecruitWait;
   const dailyWaitReasons = new Map();
   const serviceWait = new Map();
@@ -255,7 +256,7 @@ export async function runLoop(client, protocol, {
     const legacyEnabled = key => enabled(key) && !takeoverReason(key);
     const attemptedOrders = new Set();
     const harvestOptions = { config, player, attemptedOrders, cargoEnabled: () => (!!isEnabled && enabled('cargo')) || needsCargoDemand(getSettings()),
-      finishEnabled: () => allowWorld('finishOrder'), getSettings, getUsage: usage,
+      finishEnabled: () => allowWorld('finishOrder'), getSettings, getUsage: usage, ledger: usageLedger,
       beforeStep: guard.before, afterStep: guard.after, cancelStep: guard.cancel };
     function phaseFailure(phase, title, error) {
       if (!client.connected) throw error;
@@ -867,7 +868,7 @@ export async function runLoop(client, protocol, {
         const nextWait = new Map();
         if (isEnabled && allowWorld('finishOrder')) {
           for (const decision of plan.orderDecisions) {
-            if (decision.status !== 'reserved' && decision.status !== 'unknown') continue;
+            if (!['reserved', 'unknown', 'refreshing'].includes(decision.status)) continue;
             const order = survey.orders.find(o => o.index === decision.index);
             const title = (order?.workerName || '未知居民') + '的订单 #' + decision.index;
             const message = title + ' · ' + decision.reason;
